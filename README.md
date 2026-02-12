@@ -1,16 +1,28 @@
-# flutter_application_2
+# Flutter WebDAV 图片备份工具
 
-A new Flutter project.
+一个基于 Flutter 框架开发的轻量级图片备份工具，使用 WebDAV 协议实现跨平台、简洁高效的本地图片云端备份方案。
 
-## Getting Started
+## ✨ 特性
 
-This project is a starting point for a Flutter application.
+📱 跨平台支持：借助 Flutter，轻松运行于 Android、iOS、Windows、macOS、Linux
 
-A few resources to get you started if this is your first Flutter project:
+☁️ 基于 WebDAV 协议：兼容主流云存储服务（如坚果云、Nextcloud、自建服务器等）
 
-- [Lab: Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Cookbook: Useful Flutter samples](https://docs.flutter.dev/cookbook)
+🎯 简洁优雅的用户界面：专注体验，操作直观易上手
 
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+⚙️ 功能持续迭代中，致力于打造高效实用的备份体验
+
+## 🎯 项目目标
+
+### 核心功能（Key Features）
+
+- [x] 增量备份：仅上传新增或变动的图片，节省流量与存储资源
+- [ ] 自动备份：接入系统媒体库监听，实现插入即备份
+- [ ] 相册预览：在 App 内浏览已备份图片，支持分类与搜索
+- [ ] 端云协同：本地与云端数据状态同步，避免重复冗余
+- [ ] 扩展更多备份接口：支持百度网盘、阿里云盘等主流平台
+
+### 其他规划（Other Plans）
+
+- [ ] 关于页面：展示项目介绍、开源协议、作者信息等
+- [ ] 动效优化：增强交互反馈，提升整体 UI 质感与流畅度
