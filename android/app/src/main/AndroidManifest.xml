@@ -10,9 +10,9 @@
     <uses-permission android:name="android.permission.READ_MEDIA_VISUAL_USER_SELECTED"/>
 
     <application
-        android:label="TimeAlbum"
+        android:label="云映"
         android:name="${applicationName}"
-        android:icon="@mipmap/ic_launcher"
+        android:icon="@mipmap/launcher_icon"
         android:requestLegacyExternalStorage="true"> <activity
             android:name=".MainActivity"
             android:exported="true"
