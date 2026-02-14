@@ -33,35 +33,57 @@ class WebDavService {
   }
 
   // --- 核心修复：添加获取云端文件列表的方法 ---
+// --- 修复后的 listRemoteFiles 方法 ---
   Future<List<String>> listRemoteFiles(String folderPath) async {
     try {
+      // 1. 确保路径以 / 结尾
       String path = folderPath.endsWith('/') ? folderPath : '$folderPath/';
+      
       final response = await _dio.request(
         path,
         options: Options(
           method: "PROPFIND",
-          headers: {"Depth": "1"},
+          headers: {"Depth": "1"}, // 只查询当前层级
         ),
       );
 
       if (response.statusCode == 207) {
         final String xml = response.data.toString();
-        // 使用正则提取文件名
+        
+        // 2. 使用正则提取 href (兼容部分服务器返回的大小写差异)
         final RegExp hrefReg = RegExp(r'<d:href[^>]*>([^<]+)<\/d:href>', caseSensitive: false);
         final matches = hrefReg.allMatches(xml);
         
         List<String> files = [];
+        
+        // ✅ 核心修复：建立支持的格式白名单 (加入了 .webp 和 .heif)
+        final supportedExtensions = {'.jpg', '.jpeg', '.png', '.heic', '.heif', '.webp','.gif'};
+
         for (var m in matches) {
           String rawPath = m.group(1) ?? "";
-          String decodedPath = Uri.decodeFull(rawPath);
-          String name = decodedPath.split('/').last;
+          String decodedPath = Uri.decodeFull(rawPath); // URL 解码
+          String name = decodedPath.split('/').last;    // 提取文件名
           
-          // 过滤逻辑：排除当前目录、隐藏文件，只保留图片
+          // 3. 过滤逻辑
           if (name.isNotEmpty && 
-              name != path.split('/').last && 
-              !name.startsWith('.') &&
-              (name.toLowerCase().endsWith('.jpg') || name.toLowerCase().endsWith('.png') || name.toLowerCase().endsWith('.jpeg') || name.toLowerCase().endsWith('.heic'))) {
-             files.add(name);
+              name != path.split('/').last && // 排除文件夹自身
+              !name.startsWith('.')) {        // 排除隐藏文件 (.DS_Store 等)
+             
+             // 将文件名转为小写，检查是否以白名单中的后缀结尾
+             String lowerName = name.toLowerCase();
+             bool isImage = false;
+             
+             // 遍历白名单检查
+             for (var ext in supportedExtensions) {
+               if (lowerName.endsWith(ext)) {
+                 isImage = true;
+                 break;
+               }
+             }
+
+             if (isImage) {
+               files.add(name);
+             }
           }
         }
         return files;
