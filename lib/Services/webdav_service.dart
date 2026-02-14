@@ -108,4 +108,8 @@ class WebDavService {
   Future<void> downloadFile(String remotePath, String localPath) async {
     await _dio.download(remotePath, localPath);
   }
+
+  Future<void> delete(String remotePath) async {
+    await _dio.delete(remotePath);
+  }
 }
