@@ -52,7 +52,7 @@ class _SuperBackupPageState extends State<SuperBackupPage>
         urlCtrl: urlCtrl,
         userCtrl: userCtrl,
         passCtrl: passCtrl,
-        onSave: () => doBackup(silent: false),
+        onSave: () => connectAndRestoreThenBackup(silent: false),
       ),
     );
   }
@@ -137,7 +137,7 @@ class _SuperBackupPageState extends State<SuperBackupPage>
                   actions: [
                     if (!isSelectionMode) ...[
                       IconButton(
-                        onPressed: syncCloudToLocal,
+                        onPressed: saveConfigAndRestore,
                         icon: const Icon(Icons.sync),
                       ),
                       PopupMenuButton<String>(

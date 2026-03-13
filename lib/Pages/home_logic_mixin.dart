@@ -50,10 +50,22 @@ mixin HomeLogicMixin<T extends StatefulWidget> on State<T> {
 
   Future<void> _startAutoTasks() async {
     await loadConfig();
+    await refreshGallery();
     if (urlCtrl.text.isEmpty) return;
     await _manageCache();
     await syncCloudToLocal();
     await doBackup(silent: true);
+  }
+
+  Future<void> connectAndRestoreThenBackup({bool silent = false}) async {
+    await saveConfig();
+    await syncCloudToLocal(showBusy: true);
+    await doBackup(silent: silent);
+  }
+
+  Future<void> saveConfigAndRestore() async {
+    await saveConfig();
+    await syncCloudToLocal(showBusy: true);
   }
 
   Future<void> loadConfig() async {
@@ -139,16 +151,28 @@ mixin HomeLogicMixin<T extends StatefulWidget> on State<T> {
     return "cloud_${Uri.encodeComponent(fileName)}";
   }
 
-  Future<void> syncCloudToLocal() async {
+  Future<void> syncCloudToLocal({bool showBusy = false}) async {
     if (isRunning) return;
+    if (showBusy && mounted) {
+      setState(() => isRunning = true);
+    }
     try {
+      if (urlCtrl.text.trim().isEmpty) {
+        addLog("请先配置 WebDAV 地址");
+        return;
+      }
+
       final service = WebDavService(
         url: urlCtrl.text,
         user: userCtrl.text,
         pass: passCtrl.text,
       );
       final cloudFiles = await service.listRemoteFiles("MyPhotos/");
-      if (cloudFiles.isEmpty) return;
+      if (cloudFiles.isEmpty) {
+        await refreshGallery();
+        addLog("云端未发现可恢复的照片");
+        return;
+      }
 
       final dbRecords = await DbHelper.getAllRecords();
       final localKnownFiles = dbRecords
@@ -156,11 +180,13 @@ mixin HomeLogicMixin<T extends StatefulWidget> on State<T> {
           .toSet();
       final appDir = await getApplicationDocumentsDirectory();
       bool hasNewData = false;
+      int newCount = 0;
 
       for (final fileName in cloudFiles) {
         if (localKnownFiles.contains(fileName)) continue;
 
         hasNewData = true;
+        newCount++;
         int photoTime;
         try {
           photoTime = int.parse(fileName.split('_').first);
@@ -186,10 +212,15 @@ mixin HomeLogicMixin<T extends StatefulWidget> on State<T> {
         );
       }
 
-      if (hasNewData && mounted) {
-        await refreshGallery();
+      await refreshGallery();
+      addLog(hasNewData ? "已同步 $newCount 张云端照片" : "云端照片已是最新");
+    } catch (e) {
+      addLog("同步云端照片失败: $e");
+    } finally {
+      if (showBusy && mounted) {
+        setState(() => isRunning = false);
       }
-    } catch (_) {}
+    }
   }
 
   Future<void> doBackup({bool silent = false}) async {
@@ -198,6 +229,11 @@ mixin HomeLogicMixin<T extends StatefulWidget> on State<T> {
     await saveConfig();
 
     try {
+      if (urlCtrl.text.trim().isEmpty) {
+        addLog("请先配置 WebDAV 地址");
+        return;
+      }
+
       if (!await _ensurePhotoPermission()) return;
 
       final service = WebDavService(
