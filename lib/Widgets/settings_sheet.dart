@@ -17,12 +17,13 @@ class SettingsSheet extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+
     return Container(
       padding: EdgeInsets.fromLTRB(
-        24, 
-        24, 
-        24, 
-        MediaQuery.of(context).viewInsets.bottom + 24
+        24,
+        24,
+        24,
+        MediaQuery.of(context).viewInsets.bottom + 24,
       ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -33,7 +34,7 @@ class SettingsSheet extends StatelessWidget {
           TextField(
             controller: urlCtrl,
             decoration: const InputDecoration(
-              labelText: "WebDAV URL",
+              labelText: "WebDAV 地址",
               border: OutlineInputBorder(),
               prefixIcon: Icon(Icons.link),
             ),
@@ -65,7 +66,7 @@ class SettingsSheet extends StatelessWidget {
                 Navigator.pop(context);
                 onSave();
               },
-              child: const Text("保存并备份"),
+              child: const Text("保存并开始备份"),
             ),
           ),
         ],

@@ -1,8 +1,8 @@
 import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
-import 'package:permission_handler/permission_handler.dart';
 import 'package:photo_manager/photo_manager.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -10,46 +10,55 @@ import '../models/photo_item.dart';
 import '../services/db_helper.dart';
 import '../services/webdav_service.dart';
 
-// 定义一个 Mixin，绑定到 State 上
 mixin HomeLogicMixin<T extends StatefulWidget> on State<T> {
-  // 控制器
   final urlCtrl = TextEditingController();
   final userCtrl = TextEditingController();
   final passCtrl = TextEditingController();
 
-  // 状态变量
   final List<String> logs = [];
   bool isRunning = false;
   Map<String, List<PhotoItem>> groupedItems = {};
   final Set<String> sessionUploadedIds = {};
 
-  // 多选状态
   bool isSelectionMode = false;
   final Set<String> selectedIds = {};
 
-  // 初始化任务
   void initLogic() {
     _startAutoTasks();
   }
 
-  void addLog(String m) {
+  @override
+  void dispose() {
+    urlCtrl.dispose();
+    userCtrl.dispose();
+    passCtrl.dispose();
+    super.dispose();
+  }
+
+  void addLog(String message) {
     if (!mounted) return;
     setState(() {
-      logs.insert(0, "${DateTime.now().hour}:${DateTime.now().minute} $m");
-      if (logs.length > 50) logs.removeLast();
+      logs.insert(
+        0,
+        "${DateTime.now().hour}:${DateTime.now().minute.toString().padLeft(2, '0')} $message",
+      );
+      if (logs.length > 50) {
+        logs.removeLast();
+      }
     });
   }
 
   Future<void> _startAutoTasks() async {
     await loadConfig();
     if (urlCtrl.text.isEmpty) return;
-    _manageCache();
+    await _manageCache();
     await syncCloudToLocal();
-    doBackup(silent: true);
+    await doBackup(silent: true);
   }
 
   Future<void> loadConfig() async {
     final prefs = await SharedPreferences.getInstance();
+    if (!mounted) return;
     setState(() {
       urlCtrl.text = prefs.getString('url') ?? "";
       userCtrl.text = prefs.getString('user') ?? "";
@@ -66,21 +75,68 @@ mixin HomeLogicMixin<T extends StatefulWidget> on State<T> {
 
   Future<void> _manageCache() async {
     try {
-      final appDir = await getTemporaryDirectory();
-      final files = appDir
+      final tempDir = await getTemporaryDirectory();
+      final files = tempDir
           .listSync()
           .whereType<File>()
-          .where((f) => p.basename(f.path).startsWith('temp_full_'))
+          .where((file) => p.basename(file.path).startsWith('temp_full_'))
           .toList();
+
       int totalSize = 0;
-      for (var f in files) totalSize += await f.length();
+      for (final file in files) {
+        totalSize += await file.length();
+      }
+
       if (totalSize > 200 * 1024 * 1024) {
         files.sort(
           (a, b) => a.lastModifiedSync().compareTo(b.lastModifiedSync()),
         );
-        for (var f in files) f.deleteSync();
+        for (final file in files) {
+          file.deleteSync();
+        }
       }
     } catch (_) {}
+  }
+
+  Future<bool> _ensurePhotoPermission() async {
+    final permission = await PhotoManager.requestPermissionExtend();
+    return permission.isAuth || permission.hasAccess;
+  }
+
+  Future<List<AssetEntity>> _loadAllImageAssets() async {
+    final albums = await PhotoManager.getAssetPathList(type: RequestType.image);
+    final assetsById = <String, AssetEntity>{};
+    const pageSize = 200;
+
+    for (final album in albums) {
+      final total = await album.assetCountAsync;
+      for (int page = 0; page * pageSize < total; page++) {
+        final pageItems = await album.getAssetListPaged(
+          page: page,
+          size: pageSize,
+        );
+        for (final asset in pageItems) {
+          assetsById[asset.id] = asset;
+        }
+      }
+    }
+
+    return assetsById.values.toList()
+      ..sort(
+        (a, b) => b.createDateTime.millisecondsSinceEpoch.compareTo(
+          a.createDateTime.millisecondsSinceEpoch,
+        ),
+      );
+  }
+
+  String _buildCloudFileName(File file, AssetEntity asset) {
+    final timestamp = asset.createDateTime.millisecondsSinceEpoch;
+    final originalName = p.basename(file.path);
+    return "${timestamp}_$originalName";
+  }
+
+  String _buildCloudVirtualId(String fileName) {
+    return "cloud_${Uri.encodeComponent(fileName)}";
   }
 
   Future<void> syncCloudToLocal() async {
@@ -91,43 +147,48 @@ mixin HomeLogicMixin<T extends StatefulWidget> on State<T> {
         user: userCtrl.text,
         pass: passCtrl.text,
       );
-      List<String> cloudFiles = await service.listRemoteFiles("MyPhotos/");
+      final cloudFiles = await service.listRemoteFiles("MyPhotos/");
       if (cloudFiles.isEmpty) return;
 
       final dbRecords = await DbHelper.getAllRecords();
       final localKnownFiles = dbRecords
-          .map((e) => e['filename'] as String?)
+          .map((record) => record['filename'] as String?)
           .toSet();
       final appDir = await getApplicationDocumentsDirectory();
       bool hasNewData = false;
 
-      for (String fileName in cloudFiles) {
-        if (!localKnownFiles.contains(fileName)) {
-          hasNewData = true;
-          int photoTime;
-          try {
-            String timestampPart = fileName.split('_')[0];
-            photoTime = int.parse(timestampPart);
-          } catch (_) {
-            photoTime = DateTime.now().millisecondsSinceEpoch;
-          }
+      for (final fileName in cloudFiles) {
+        if (localKnownFiles.contains(fileName)) continue;
 
-          String vId = "cloud_${fileName.hashCode}";
-          String tPath = '${appDir.path}/thumb_$vId.jpg';
-          if (!File(tPath).existsSync()) {
-            try {
-              await service.downloadFile("MyPhotos/.thumbs/$fileName", tPath);
-            } catch (_) {}
-          }
-          await DbHelper.markAsUploaded(
-            vId,
-            thumbPath: tPath,
-            time: photoTime,
-            filename: fileName,
-          );
+        hasNewData = true;
+        int photoTime;
+        try {
+          photoTime = int.parse(fileName.split('_').first);
+        } catch (_) {
+          photoTime = DateTime.now().millisecondsSinceEpoch;
         }
+
+        final virtualId = _buildCloudVirtualId(fileName);
+        final thumbPath = '${appDir.path}/thumb_$virtualId.jpg';
+        final thumbFile = File(thumbPath);
+
+        if (!thumbFile.existsSync()) {
+          try {
+            await service.downloadFile("MyPhotos/.thumbs/$fileName", thumbPath);
+          } catch (_) {}
+        }
+
+        await DbHelper.markAsUploaded(
+          virtualId,
+          thumbPath: thumbPath,
+          time: photoTime,
+          filename: fileName,
+        );
       }
-      if (hasNewData && mounted) refreshGallery();
+
+      if (hasNewData && mounted) {
+        await refreshGallery();
+      }
     } catch (_) {}
   }
 
@@ -135,13 +196,9 @@ mixin HomeLogicMixin<T extends StatefulWidget> on State<T> {
     if (isRunning) return;
     setState(() => isRunning = true);
     await saveConfig();
+
     try {
-      if (Platform.isAndroid) {
-        final ps = await PhotoManager.requestPermissionExtend();
-        if (!ps.isAuth) return;
-      } else {
-        if (!(await Permission.photos.request().isGranted)) return;
-      }
+      if (!await _ensurePhotoPermission()) return;
 
       final service = WebDavService(
         url: urlCtrl.text,
@@ -150,45 +207,87 @@ mixin HomeLogicMixin<T extends StatefulWidget> on State<T> {
       );
       await service.ensureFolder("MyPhotos/");
       await service.ensureFolder("MyPhotos/.thumbs/");
-      final albums = await PhotoManager.getAssetPathList(
-        type: RequestType.image,
-      );
 
-      if (albums.isNotEmpty) {
-        final photos = await albums.first.getAssetListPaged(page: 0, size: 200);
-        final appDir = await getApplicationDocumentsDirectory();
-        for (var asset in photos) {
-          if (await DbHelper.isUploaded(asset.id)) continue;
-          File? file = await asset.file;
-          if (file == null) continue;
+      final photos = await _loadAllImageAssets();
+      if (photos.isEmpty) return;
 
-          int timestamp = asset.createDateTime.millisecondsSinceEpoch;
-          String originalName = p.basename(file.path);
-          String cloudFileName = "${timestamp}_$originalName";
+      final dbRecords = await DbHelper.getAllRecords();
+      final filenameToRecord = <String, Map<String, dynamic>>{
+        for (final row in dbRecords)
+          if (row['filename'] != null) row['filename'] as String: row,
+      };
+      final processedCloudFileNames = <String>{};
+      final appDir = await getApplicationDocumentsDirectory();
+      for (final asset in photos) {
+        if (await DbHelper.isUploaded(asset.id)) continue;
 
-          if (!silent) addLog("正在备份: $originalName");
+        final file = await asset.file;
+        if (file == null) continue;
 
-          await service.upload(file, "MyPhotos/$cloudFileName");
-          final thumbData = await asset.thumbnailDataWithSize(
-            const ThumbnailSize(300, 300),
-          );
-          String? tPath;
-          if (thumbData != null) {
-            await service.uploadBytes(
-              thumbData,
-              "MyPhotos/.thumbs/$cloudFileName",
-            );
-            final tFile = File('${appDir.path}/thumb_${asset.id}.jpg')
-              ..writeAsBytesSync(thumbData);
-            tPath = tFile.path;
+        final timestamp = asset.createDateTime.millisecondsSinceEpoch;
+        final cloudFileName = _buildCloudFileName(file, asset);
+        final existingRecord = filenameToRecord[cloudFileName];
+
+        if (!processedCloudFileNames.add(cloudFileName) && existingRecord == null) {
+          continue;
+        }
+
+        if (existingRecord != null) {
+          final existingAssetId = existingRecord['asset_id'] as String;
+          if (existingAssetId != asset.id) {
+            await DbHelper.deleteByAssetId(existingAssetId);
           }
+
           await DbHelper.markAsUploaded(
             asset.id,
-            thumbPath: tPath,
-            time: timestamp,
+            thumbPath: existingRecord['thumbnail_path'] as String?,
+            time: existingRecord['create_time'] as int? ?? timestamp,
             filename: cloudFileName,
           );
-          if (mounted) setState(() => sessionUploadedIds.add(asset.id));
+
+          if (mounted) {
+            setState(() => sessionUploadedIds.add(asset.id));
+          }
+          continue;
+        }
+
+        final originalName = p.basename(file.path);
+
+        if (!silent) {
+          addLog("正在备份: $originalName");
+        }
+
+        await service.upload(file, "MyPhotos/$cloudFileName");
+        final thumbData = await asset.thumbnailDataWithSize(
+          const ThumbnailSize(300, 300),
+        );
+
+        String? thumbPath;
+        if (thumbData != null) {
+          await service.uploadBytes(
+            thumbData,
+            "MyPhotos/.thumbs/$cloudFileName",
+          );
+          final thumbFile = File('${appDir.path}/thumb_${asset.id}.jpg')
+            ..writeAsBytesSync(thumbData);
+          thumbPath = thumbFile.path;
+        }
+
+        await DbHelper.markAsUploaded(
+          asset.id,
+          thumbPath: thumbPath,
+          time: timestamp,
+          filename: cloudFileName,
+        );
+        filenameToRecord[cloudFileName] = {
+          'asset_id': asset.id,
+          'thumbnail_path': thumbPath,
+          'create_time': timestamp,
+          'filename': cloudFileName,
+        };
+
+        if (mounted) {
+          setState(() => sessionUploadedIds.add(asset.id));
         }
       }
     } catch (e) {
@@ -196,70 +295,78 @@ mixin HomeLogicMixin<T extends StatefulWidget> on State<T> {
     } finally {
       if (mounted) {
         setState(() => isRunning = false);
-        refreshGallery();
+        await refreshGallery();
       }
     }
   }
 
   Future<void> refreshGallery() async {
-    final albums = await PhotoManager.getAssetPathList(type: RequestType.image);
-    List<AssetEntity> localAssets = albums.isNotEmpty
-        ? await albums.first.getAssetListPaged(page: 0, size: 5000)
-        : [];
-    Map<String, AssetEntity> localAssetMap = {
-      for (var e in localAssets) e.id: e,
+    List<AssetEntity> localAssets = [];
+    if (await _ensurePhotoPermission()) {
+      localAssets = await _loadAllImageAssets();
+    }
+
+    final localAssetMap = {
+      for (final asset in localAssets) asset.id: asset,
     };
 
     final dbRecords = await DbHelper.getAllRecords();
-    Map<String, PhotoItem> mergedMap = {};
+    final mergedMap = <String, PhotoItem>{};
 
-    for (var row in dbRecords) {
-      String id = row['asset_id'];
+    for (final row in dbRecords) {
+      final id = row['asset_id'] as String;
       mergedMap[id] = PhotoItem(
         id: id,
         asset: localAssetMap[id],
-        localThumbPath: row['thumbnail_path'],
-        remoteFileName: row['filename'],
-        createTime: row['create_time'] ?? 0,
+        localThumbPath: row['thumbnail_path'] as String?,
+        remoteFileName: row['filename'] as String?,
+        createTime: row['create_time'] as int? ?? 0,
         isBackedUp: true,
       );
     }
-    for (var asset in localAssets) {
-      if (!mergedMap.containsKey(asset.id)) {
-        mergedMap[asset.id] = PhotoItem(
+
+    for (final asset in localAssets) {
+      mergedMap.putIfAbsent(
+        asset.id,
+        () => PhotoItem(
           id: asset.id,
           asset: asset,
           createTime: asset.createDateTime.millisecondsSinceEpoch,
-        );
-      }
+        ),
+      );
     }
 
-    var list = mergedMap.values.toList()
+    final items = mergedMap.values.toList()
       ..sort((a, b) => b.createTime.compareTo(a.createTime));
-    Map<String, List<PhotoItem>> groups = {};
-    DateTime now = DateTime.now();
-    DateTime today = DateTime(now.year, now.month, now.day);
-    DateTime yesterday = today.subtract(const Duration(days: 1));
 
-    for (var item in list) {
-      DateTime date = DateTime.fromMillisecondsSinceEpoch(item.createTime);
-      DateTime itemDay = DateTime(date.year, date.month, date.day);
-      String key = (itemDay == today)
+    final groups = <String, List<PhotoItem>>{};
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final yesterday = today.subtract(const Duration(days: 1));
+
+    for (final item in items) {
+      final date = DateTime.fromMillisecondsSinceEpoch(item.createTime);
+      final itemDay = DateTime(date.year, date.month, date.day);
+      final key = itemDay == today
           ? "今天"
-          : (itemDay == yesterday
-                ? "昨天"
-                : "${date.year}年${date.month}月${date.day}日");
+          : itemDay == yesterday
+              ? "昨天"
+              : "${date.year}年${date.month}月${date.day}日";
       groups.putIfAbsent(key, () => []).add(item);
     }
-    if (mounted) setState(() => groupedItems = groups);
+
+    if (mounted) {
+      setState(() => groupedItems = groups);
+    }
   }
 
-  // --- 多选逻辑 ---
   void toggleSelection(String id) {
     setState(() {
       if (selectedIds.contains(id)) {
         selectedIds.remove(id);
-        if (selectedIds.isEmpty) isSelectionMode = false;
+        if (selectedIds.isEmpty) {
+          isSelectionMode = false;
+        }
       } else {
         selectedIds.add(id);
       }
@@ -267,26 +374,27 @@ mixin HomeLogicMixin<T extends StatefulWidget> on State<T> {
   }
 
   void selectAll() {
-    final allIds = groupedItems.values.expand((l) => l).map((e) => e.id);
+    final allIds = groupedItems.values.expand((list) => list).map((e) => e.id);
     setState(() => selectedIds.addAll(allIds));
   }
 
   void exitSelectionMode() {
+    if (!mounted) return;
     setState(() {
       isSelectionMode = false;
       selectedIds.clear();
     });
   }
 
-  // --- 删除云端 ---
   Future<void> deleteSelectedCloud() async {
     if (selectedIds.isEmpty) return;
+
     final confirm = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text("删除云端备份"),
         content: Text(
-          "确定要删除选中的 ${selectedIds.length} 张图片的云端备份吗？\n\n注意：本地图片不会被删除，但云端数据将不可恢复。",
+          "确定要删除选中的 ${selectedIds.length} 张图片云端备份吗？\n\n本地相册不会删除，但云端文件会被永久移除。",
         ),
         actions: [
           TextButton(
@@ -295,7 +403,7 @@ mixin HomeLogicMixin<T extends StatefulWidget> on State<T> {
           ),
           TextButton(
             onPressed: () => Navigator.pop(ctx, true),
-            child: const Text("确定删除", style: TextStyle(color: Colors.red)),
+            child: const Text("确认删除", style: TextStyle(color: Colors.red)),
           ),
         ],
       ),
@@ -311,47 +419,48 @@ mixin HomeLogicMixin<T extends StatefulWidget> on State<T> {
       );
       final dbRecords = await DbHelper.getAllRecords();
       final idToFilename = {
-        for (var r in dbRecords) r['asset_id']: r['filename'],
+        for (final row in dbRecords) row['asset_id'] as String: row['filename'],
       };
+
       int count = 0;
-      for (String id in selectedIds) {
-        String? filename = idToFilename[id];
-        if (filename != null) {
+      for (final id in selectedIds) {
+        final filename = idToFilename[id] as String?;
+        if (filename == null) continue;
+
+        try {
+          await service.delete("MyPhotos/$filename");
           try {
-            await service.delete("MyPhotos/$filename");
-            try {
-              await service.delete("MyPhotos/.thumbs/$filename");
-            } catch (_) {}
-            final db = await DbHelper.db;
-            await db.delete(
-              'uploaded_assets',
-              where: 'asset_id = ?',
-              whereArgs: [id],
-            );
-            count++;
+            await service.delete("MyPhotos/.thumbs/$filename");
           } catch (_) {}
-        }
+
+          final db = await DbHelper.db;
+          await db.delete(
+            'uploaded_assets',
+            where: 'asset_id = ?',
+            whereArgs: [id],
+          );
+          count++;
+        } catch (_) {}
       }
-      addLog("已删除 $count 张云端备份");
+
+      addLog("已删除 $count 个云端备份");
     } catch (e) {
-      addLog("删除出错: $e");
+      addLog("删除失败: $e");
     } finally {
       if (mounted) {
-        setState(() {
-          isRunning = false;
-          exitSelectionMode();
-        });
-        refreshGallery();
+        exitSelectionMode();
+        setState(() => isRunning = false);
+        await refreshGallery();
       }
     }
   }
 
-  // --- 一键释放本地空间 ---
   Future<void> freeAllLocalSpace() async {
-    List<String> idsToDelete = [];
+    final idsToDelete = <String>[];
     int count = 0;
-    for (var list in groupedItems.values) {
-      for (var item in list) {
+
+    for (final list in groupedItems.values) {
+      for (final item in list) {
         if (item.isBackedUp && item.asset != null) {
           idsToDelete.add(item.id);
           count++;
@@ -360,18 +469,18 @@ mixin HomeLogicMixin<T extends StatefulWidget> on State<T> {
     }
 
     if (idsToDelete.isEmpty) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text("本地照片都还没备份，或者已经释放过了~")));
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("当前没有可释放的已备份本地照片")),
+      );
       return;
     }
 
     final confirm = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text("一键释放空间"),
+        title: const Text("释放本地空间"),
         content: Text(
-          "发现 $count 张照片已经备份到云端。\n\n确定要从手机相册中删除它们吗？\n删除后，您仍可以在 App 内查看云端预览图。",
+          "检测到 $count 张照片已备份到云端。\n\n确认要从系统相册中删除它们吗？删除后仍可在应用内查看云端缩略图和原图。",
           style: const TextStyle(height: 1.5),
         ),
         actions: [
@@ -387,32 +496,36 @@ mixin HomeLogicMixin<T extends StatefulWidget> on State<T> {
         ],
       ),
     );
-
     if (confirm != true) return;
 
     try {
+      if (!await _ensurePhotoPermission()) {
+        addLog("未获得相册权限，无法释放本地空间");
+        return;
+      }
+
       final result = await PhotoManager.editor.deleteWithIds(idsToDelete);
       if (result.isNotEmpty) {
-        addLog("成功释放 ${result.length} 张照片空间");
+        addLog("成功释放 ${result.length} 张照片占用的本地空间");
       }
     } catch (e) {
       addLog("释放失败: $e");
     } finally {
-      if (mounted) refreshGallery();
+      if (mounted) {
+        await refreshGallery();
+      }
     }
   }
 
-  // --- 📥 新增：下载选中图片到本地相册 ---
   Future<void> downloadSelectedToLocal() async {
     if (selectedIds.isEmpty) return;
 
-    // 1. 确认对话框
     final confirm = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text("下载到本地"),
+        title: const Text("保存到本地"),
         content: Text(
-          "确定要将选中的 ${selectedIds.length} 张图片保存到手机相册吗？\n\n注意：如果图片已经在本地，将会跳过下载。",
+          "确定要将选中的 ${selectedIds.length} 张图片保存到系统相册吗？\n\n如果图片已经存在于本地，会自动跳过。",
         ),
         actions: [
           TextButton(
@@ -426,84 +539,91 @@ mixin HomeLogicMixin<T extends StatefulWidget> on State<T> {
         ],
       ),
     );
-
     if (confirm != true) return;
 
     setState(() => isRunning = true);
 
-    // 2. 准备数据
     int successCount = 0;
     int skipCount = 0;
     int failCount = 0;
 
     try {
+      if (!await _ensurePhotoPermission()) {
+        addLog("未获得相册权限，无法保存图片");
+        return;
+      }
+
       final service = WebDavService(
         url: urlCtrl.text,
         user: userCtrl.text,
         pass: passCtrl.text,
       );
       final dbRecords = await DbHelper.getAllRecords();
+      final idToRecord = {
+        for (final row in dbRecords) row['asset_id'] as String: row,
+      };
       final idToFilename = {
-        for (var r in dbRecords) r['asset_id']: r['filename'],
+        for (final row in dbRecords) row['asset_id'] as String: row['filename'],
       };
       final tempDir = await getTemporaryDirectory();
+      final allItems = groupedItems.values.expand((items) => items).toList();
 
-      // 获取所有 Item 以便检查状态
-      final allItems = groupedItems.values.expand((e) => e).toList();
-
-      for (String id in selectedIds) {
-        // 找到对应的 PhotoItem
+      for (final id in selectedIds) {
         final item = allItems.firstWhere(
-          (e) => e.id == id,
+          (entry) => entry.id == id,
           orElse: () => PhotoItem(id: "none", createTime: 0),
         );
 
-        // 如果本地已经有了 (asset != null)，则跳过，避免重复
         if (item.asset != null) {
           skipCount++;
           continue;
         }
 
-        String? filename = idToFilename[id];
-        if (filename != null) {
-          try {
-            addLog("正在下载: $filename");
+        final filename = idToFilename[id] as String?;
+        if (filename == null) continue;
 
-            // A. 下载到临时文件
-            String tempPath = '${tempDir.path}/download_$filename';
-            await service.downloadFile("MyPhotos/$filename", tempPath);
+        try {
+          addLog("正在下载: $filename");
+          final tempPath = '${tempDir.path}/download_$filename';
+          await service.downloadFile("MyPhotos/$filename", tempPath);
 
-            // B. 保存到手机相册 (PhotoManager 会自动处理刷新)
-            // title 参数在某些系统版本可能不生效，主要靠文件内容
-            final AssetEntity? result = await PhotoManager.editor
-                .saveImageWithPath(tempPath, title: filename);
+          final savedAsset = await PhotoManager.editor.saveImageWithPath(
+            tempPath,
+            title: filename,
+          );
 
-            // C. 清理临时文件
-            File(tempPath).deleteSync();
+          final existingRecord = idToRecord[id];
+          await DbHelper.deleteByAssetId(id);
+          await DbHelper.markAsUploaded(
+            savedAsset.id,
+            thumbPath: existingRecord?['thumbnail_path'] as String?,
+            time: existingRecord?['create_time'] as int?,
+            filename: filename,
+          );
 
-            if (result != null) {
-              successCount++;
-            } else {
-              failCount++;
-            }
-          } catch (e) {
-            print("下载失败: $e");
-            failCount++;
+          final tempFile = File(tempPath);
+          if (tempFile.existsSync()) {
+            tempFile.deleteSync();
           }
+
+          successCount++;
+        } catch (e) {
+          addLog("下载失败: $e");
+          failCount++;
         }
       }
 
-      addLog("下载完成: 成功 $successCount 张, 跳过 $skipCount 张");
-      if (failCount > 0) addLog("失败 $failCount 张");
+      addLog("下载完成: 成功 $successCount，跳过 $skipCount");
+      if (failCount > 0) {
+        addLog("下载失败 $failCount 张");
+      }
     } catch (e) {
       addLog("批量下载出错: $e");
     } finally {
       if (mounted) {
-        setState(() {
-          isRunning = false;
-          exitSelectionMode(); // 下载完退出多选模式
-        });
-        refreshGallery(); // 刷新界面，让它们从“云朵图标”变回“正常图片”
+        exitSelectionMode();
+        setState(() => isRunning = false);
+        await refreshGallery();
       }
     }
   }

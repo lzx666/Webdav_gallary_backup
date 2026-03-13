@@ -1,6 +1,8 @@
 import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
+
 import '../models/photo_item.dart';
 import '../services/webdav_service.dart';
 
@@ -9,7 +11,12 @@ class PhotoViewer extends StatefulWidget {
   final int initialIndex;
   final WebDavService service;
 
-  const PhotoViewer({super.key, required this.galleryItems, required this.initialIndex, required this.service});
+  const PhotoViewer({
+    super.key,
+    required this.galleryItems,
+    required this.initialIndex,
+    required this.service,
+  });
 
   @override
   State<PhotoViewer> createState() => _PhotoViewerState();
@@ -35,14 +42,16 @@ class _PhotoViewerState extends State<PhotoViewer> {
     return Scaffold(
       backgroundColor: Colors.black,
       appBar: AppBar(
-        backgroundColor: Colors.transparent, 
-        elevation: 0, 
+        backgroundColor: Colors.transparent,
+        elevation: 0,
         iconTheme: const IconThemeData(color: Colors.white),
       ),
       body: PageView.builder(
         controller: _pageController,
         itemCount: widget.galleryItems.length,
-        itemBuilder: (context, index) => _buildSinglePage(widget.galleryItems[index]),
+        itemBuilder: (context, index) {
+          return _buildSinglePage(widget.galleryItems[index]);
+        },
       ),
     );
   }
@@ -51,26 +60,33 @@ class _PhotoViewerState extends State<PhotoViewer> {
     return Center(
       child: FutureBuilder<File?>(
         future: _getBestImage(item),
-        builder: (context, snap) {
-          if (snap.connectionState == ConnectionState.waiting) {
-             return Column(
-               mainAxisAlignment: MainAxisAlignment.center,
-               children: const [
-                 CircularProgressIndicator(color: Colors.white),
-                 SizedBox(height: 10),
-                 Text("正在下载原图...", style: TextStyle(color: Colors.white70))
-               ],
-             );
+        builder: (context, snapshot) {
+          if (snapshot.connectionState == ConnectionState.waiting) {
+            return const Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                CircularProgressIndicator(color: Colors.white),
+                SizedBox(height: 10),
+                Text(
+                  "正在加载原图...",
+                  style: TextStyle(color: Colors.white70),
+                ),
+              ],
+            );
           }
-          if (snap.hasData && snap.data != null) {
-            return InteractiveViewer(child: Image.file(snap.data!, fit: BoxFit.contain));
+
+          if (snapshot.hasData && snapshot.data != null) {
+            return InteractiveViewer(
+              child: Image.file(snapshot.data!, fit: BoxFit.contain),
+            );
           }
+
           return const Column(
-             mainAxisAlignment: MainAxisAlignment.center,
-             children: [
-                Icon(Icons.broken_image, color: Colors.white54, size: 50),
-                Text("加载失败", style: TextStyle(color: Colors.white54))
-             ],
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(Icons.broken_image, color: Colors.white54, size: 50),
+              Text("加载失败", style: TextStyle(color: Colors.white54)),
+            ],
           );
         },
       ),
@@ -78,29 +94,30 @@ class _PhotoViewerState extends State<PhotoViewer> {
   }
 
   Future<File?> _getBestImage(PhotoItem item) async {
-    // 1. 如果本地相册有，直接返回
     if (item.asset != null) {
       final file = await item.asset!.file;
-      if (file != null && file.existsSync()) return file;
+      if (file != null && file.existsSync()) {
+        return file;
+      }
     }
 
-    // 2. 如果本地已删，尝试找缓存
-    final appDir = await getTemporaryDirectory();
+    final tempDir = await getTemporaryDirectory();
     String fileName = item.remoteFileName ?? "${item.id}.jpg";
-    if (!fileName.contains('.')) fileName += ".jpg";
-    
-    final localPath = '${appDir.path}/temp_full_$fileName';
+    if (!fileName.contains('.')) {
+      fileName += ".jpg";
+    }
+
+    final localPath = '${tempDir.path}/temp_full_$fileName';
     final file = File(localPath);
 
     if (file.existsSync() && file.lengthSync() > 0) {
       return file;
     }
 
-    // 3. 缓存没有，下载
     try {
       await widget.service.downloadFile("MyPhotos/$fileName", localPath);
       return file;
-    } catch (e) {
+    } catch (_) {
       return null;
     }
   }

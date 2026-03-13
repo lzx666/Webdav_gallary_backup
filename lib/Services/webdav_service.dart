@@ -90,7 +90,6 @@ class WebDavService {
       }
       return [];
     } catch (e) {
-      print("List files error: $e");
       return [];
     }
   }

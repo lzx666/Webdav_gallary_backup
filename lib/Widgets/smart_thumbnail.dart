@@ -26,6 +26,18 @@ class _SmartThumbnailState extends State<SmartThumbnail> {
     _checkAndLoad();
   }
 
+  @override
+  void didUpdateWidget(covariant SmartThumbnail oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.item.id != widget.item.id ||
+        oldWidget.item.remoteFileName != widget.item.remoteFileName ||
+        oldWidget.item.asset?.id != widget.item.asset?.id) {
+      _imageFile = null;
+      _isLoading = false;
+      _checkAndLoad();
+    }
+  }
+
   Future<void> _checkAndLoad() async {
     if (widget.item.asset != null) return;
     final appDir = await getApplicationDocumentsDirectory();

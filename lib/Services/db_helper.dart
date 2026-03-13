@@ -60,4 +60,13 @@ class DbHelper {
     final List<Map<String, dynamic>> maps = await database.query('uploaded_assets', where: 'asset_id = ?', whereArgs: [id]);
     return maps.isNotEmpty;
   }
+
+  static Future<void> deleteByAssetId(String id) async {
+    final database = await db;
+    await database.delete(
+      'uploaded_assets',
+      where: 'asset_id = ?',
+      whereArgs: [id],
+    );
+  }
 }
